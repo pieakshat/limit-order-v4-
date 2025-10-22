@@ -3,6 +3,7 @@ pragma solidity ^0.8.26;
 
 import {BaseHook} from "@uniswap/v4-periphery/src/utils/BaseHook.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol"; 
+import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 
@@ -42,7 +43,7 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
 
 
     function getHookPermissions() 
-    external 
+    public 
     pure 
     override 
     returns(Hooks.Permissions memory)
@@ -77,7 +78,7 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
     function _afterSwap(
         address, 
         PoolKey calldata key, 
-        IPoolManager.SwapParams calldata params,
+        SwapParams calldata params,
         BalanceDelta, 
         bytes calldata  
     ) internal pure override returns(bytes4, int128) {
@@ -102,7 +103,7 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
         _mint(msg.sender, positionId, inputAmount, "");
 
         // transfer input token from user to hook contract 
-        address sellToken = zeroForOne ? Currency.unwrap(key.currency0) : Currency.unswrap(key.currency1);
+        address sellToken = zeroForOne ? Currency.unwrap(key.currency0) : Currency.unwrap(key.currency1);
         IERC20(sellToken).transferFrom(msg.sender, address(this), inputAmount);
         return tickToExecuteAt;
     }
@@ -119,7 +120,7 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
 
         uint256 positionIdTokens = balanceOf(msg.sender, positionId); 
         if (positionIdTokens < amountToCancel) {
-            revert notEnoughClaimTokens(); 
+            revert NotEnoughClaimTokens(); 
         }
 
         pendingOrders[key.toId()][tickToExecuteAt][zeroForOne] -= amountToCancel;
@@ -149,7 +150,7 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
 
         // percentage share of the input amount is used
         uint256 totalClaimableForPosition = claimableOutputTokens[positionId]; 
-        uint256 totalInputAmountForPosition = claimTokenSupply[positionId]; 
+        uint256 totalInputAmountForPosition = claimTokensSupply[positionId]; 
 
         uint256 outputAmountToSend = (inputAmountToClaimFor * totalClaimableForPosition) / totalInputAmountForPosition; 
 
@@ -159,31 +160,31 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
         // transfer output tokens 
         claimableOutputTokens[positionId] -= outputAmountToSend; 
         claimTokensSupply[positionId] -= inputAmountToClaimFor; 
-        _burn(msg.seder, positionId, inputAmountToClaimFor);
+        _burn(msg.sender, positionId, inputAmountToClaimFor);
 
         Currency token = zeroForOne ? key.currency1 : key.currency0; 
         token.transfer(msg.sender, outputAmountToSend);
     }
 
-    function executeOrder(Poolkey calldata key, int24 tick, bool zeroForOne, uint256 inputAmount) internal {
+    function executeOrder(PoolKey calldata key, int24 tick, bool zeroForOne, uint256 inputAmount) internal {
         // perform a swap 
         // settle balances for swap against the poolManager
 
         BalanceDelta delta = swapAndSettleBalances(
             key, 
-            IPoolManager.SwapParams({
+            SwapParams({
                 zeroForOne: zeroForOne, 
                 amountSpecified: -int256(inputAmount), 
-                sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRt_PRICE - 1
+                sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
             })
         ); 
 
         // update mappings 
         pendingOrders[key.toId()][tick][zeroForOne] -= inputAmount; 
         uint256 positionId = getPositionId(key, tick, zeroForOne); 
-        uint256 outputAmount = zeroForOne ? uint256(int256(delta.amount1)) : uint256(int256(delta.amount0)); 
+        uint256 outputAmount = zeroForOne ? uint256(int256(delta.amount1())) : uint256(int256(delta.amount0())); 
 
-        claimableOutputtokens[positionId] += outputAmount; 
+        claimableOutputTokens[positionId] += outputAmount; 
     } 
 
 
@@ -191,12 +192,12 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
     // Helper function 
     function swapAndSettleBalances(
         PoolKey calldata key, 
-        IPoolManager.SwapParams calldata params 
+        SwapParams memory params 
         ) internal returns (BalanceDelta) {
             // we don't need to unlock the poolManage rin this case 
             // because hook is already operating inside of an unlocked pool manager 
 
-            BalanceDelta delta = poolManager.swap(address(this), key, params, ""); 
+            BalanceDelta delta = poolManager.swap(key, params, ""); 
 
             // settle balances 
             if (params.zeroForOne) {
@@ -205,14 +206,14 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
                 // amount1 will be positive 
                 // take amount1 
 
-                _settle(key.currency0, uint128(-delta.amount0)); 
-                _take(key.currency1, uint128(delta.amount1));
+                _settle(key.currency0, uint128(-delta.amount0())); 
+                _take(key.currency1, uint128(delta.amount1()));
             } else {
                 // settle amount1 
                 // take amount0 
 
-                _settle(key.currency1, uint128(-delta.amount1)); 
-                _take(key.currrency0, uint128(delta.amount0)); 
+                _settle(key.currency1, uint128(-delta.amount1())); 
+                _take(key.currency0, uint128(delta.amount0())); 
             }
 
 
@@ -220,7 +221,7 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
             // sending money from swapper -> PM 
             // take 
             // taking money fro PM -> swapper 
-
+            return delta; 
         }
 
     function _settle(Currency currency, uint128 amount) internal {
