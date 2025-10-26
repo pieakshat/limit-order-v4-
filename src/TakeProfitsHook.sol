@@ -108,8 +108,8 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
         return tickToExecuteAt;
     }
 
-    // Step two: cancel Order 
-        function cancelOrder(
+    // cancel Order 
+    function cancelOrder(
         PoolKey calldata key, 
         int24 tickToSellAt, 
         bool zeroForOne, 
