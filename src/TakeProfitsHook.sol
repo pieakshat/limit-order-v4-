@@ -25,11 +25,13 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
     using BalanceDeltaLibrary for BalanceDelta;
+    using StateLibrary for IPoolManager; 
 
     mapping(PoolId poolId => mapping(int24 tickToExecuteAt => mapping(bool zeroForOne => uint256 inputAmount))) public pendingOrders; 
 
     mapping (uint256 positionId => uint256 claimSupply) public claimTokensSupply;
-    mapping (uint256 positionId => uint256 outputClaimable) public claimableOutputTokens;  
+    mapping (uint256 positionId => uint256 outputClaimable) public claimableOutputTokens; 
+    mapping(PoolId poolId => int24 lastTick) public lastKnownTick; 
 
     error NotEnoughClaimTokens();
     error NothingToClaim();
@@ -71,18 +73,89 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
         PoolKey calldata key, 
         uint160, 
         int24 tick
-    ) internal pure override returns(bytes4) {
-        return this.beforeInitialize.selector; 
+    ) internal override returns(bytes4) {
+        lastKnownTick[key.toId()] = tick; 
+        return this.afterInitialize.selector; 
     } 
 
     function _afterSwap(
-        address, 
+        address sender, 
         PoolKey calldata key, 
         SwapParams calldata params,
         BalanceDelta, 
         bytes calldata  
-    ) internal pure override returns(bytes4, int128) {
+    ) internal override returns(bytes4, int128) {
+        // if we are entering this function after swap being made by the hook
+        // we don't want to end-up in an endless recursive loop 
+        if (sender == address(this)) return (this.afterSwap.selector, 0); 
+
+        // we're gonna have a high level loop 
+        // that just goes on until we break out of it 
+        bool tryMore = true; 
+        int24 currentTick; 
+
+        while (tryMore) {
+            // in the case there are no orders left to be executed, 
+            // we should break out of this high-level loop 
+            // and finish afterSwap 
+
+            // in the case we do endup executing an order 
+            // then this order will cause a further movement in the pool's tick value 
+            // we kind of have to start again and look for new orders that might be valid again 
+            // and should be executed
+            // in the new "tick shift range" 
+
+            (tryMore, currentTick) = tryExecutingOrders(
+                key, 
+                !params.zeroForOne
+            ); 
+        }
+
+        lastKnownTick[key.toId()] = currentTick; 
         return (this.afterSwap.selector, 0); 
+    }
+
+    function tryExecutingOrders(
+        PoolKey calldata key, 
+        bool orderDirection
+    ) internal returns(bool tryMore, int24 newTick) {
+         // 1. get the current tick of the pool (tick after bob's orignal swap)
+         (, int24 currentTick, , ) = poolManager.getSlot0(key.toId()); 
+         // 2/ get the "last known tick"" of the pool (from our mapping)
+         int24 lastTick = lastKnownTick[key.toId()]; 
+
+        //  Case (1) if newTick > lastTick 
+        if (currentTick > lastTick) {
+            // loop from last tick to current tick 
+            // iterating over 'tickspacing' amount over each time 
+            // and execute orders looking to sell token 0
+            for (int24 tick = lastTick; tick <= currentTick; tick += key.tickSpacing) {
+                // execute an order if any 
+                uint256 inputAmountToSell = pendingOrders[key.toId()][tick][orderDirection];
+                if (inputAmountToSell > 0) {
+                    executeOrder(key, tick, orderDirection, inputAmountToSell); 
+                    return (true, currentTick); 
+                }
+            }
+        } else {
+            for (int24 tick = lastTick; tick >= currentTick;  tick -= key.tickSpacing) {
+                uint256 inputAmountToSell = pendingOrders[key.toId()][tick][
+                    orderDirection
+                ]; 
+                if (inputAmountToSell > 0) {
+                    executeOrder(key, tick, orderDirection, inputAmountToSell); 
+                    return (true, currentTick); 
+                }
+            }
+        }
+        // Case (2) if newTick < lastTick
+
+        // if we find any orders in any case we execute the order 
+        // and then return tryMore = true and the newTick value 
+
+        // if we don't find anything to execute 
+        // default return: tryMore = false, newTick = currentTick 
+        return(false, currentTick); 
     }
 
 
